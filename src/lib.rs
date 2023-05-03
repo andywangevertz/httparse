@@ -745,14 +745,28 @@ pub fn parse_version(bytes: &mut Bytes) -> Result<u8> {
         // NOTE: should be const once MSRV >= 1.44
         let h10: u64 = u64::from_ne_bytes(*b"HTTP/1.0");
         let h11: u64 = u64::from_ne_bytes(*b"HTTP/1.1");
-        unsafe { bytes.advance(8); }
+        let h20: u64 = u64::from_ne_bytes(*b"HTTP/2.0");
+        let s20: u64 = u64::from_ne_bytes(*b"SIP/2.0\r"); // it is a REQ
+        let s21: u64 = u64::from_ne_bytes(*b"SIP/2.0 ");  // it is a RSP
         let block = u64::from_ne_bytes(eight);
         // NOTE: should be match once h10 & h11 are consts
         return if block == h10 {
+            unsafe { bytes.advance(8); }
             Ok(Status::Complete(0))
         } else if block == h11 {
+            unsafe { bytes.advance(8); }
             Ok(Status::Complete(1))
+        } else if block == h20 {
+            unsafe { bytes.advance(8); }
+            Ok(Status::Complete(2))
+        } else if block == s20 {
+            unsafe { bytes.advance(8); }
+            Ok(Status::Complete(20))
+        } else if block == s21 {
+            unsafe { bytes.advance(7); }
+            Ok(Status::Complete(20))
         } else {
+            unsafe { bytes.advance(8); }
             Err(Error::Version)
         }
     }
@@ -1265,7 +1279,7 @@ pub fn parse_chunk_size(buf: &[u8])
 mod tests {
     use super::{Request, Response, Status, EMPTY_HEADER, parse_chunk_size};
 
-    const NUM_OF_HEADERS: usize = 4;
+    const NUM_OF_HEADERS: usize = 20;
 
     macro_rules! req {
         ($name:ident, $buf:expr, |$arg:ident| $body:expr) => (
@@ -1285,6 +1299,65 @@ mod tests {
             }
         }
         )
+    }
+    // OPTIONS sips:3000@172.16.246.223:5061 SIP/2.0
+    req! {
+        test_sip_option,
+        b"OPTIONS sips:3000@172.16.246.223:5061 SIP/2.0\r\n\r\n",
+        |req| {
+            assert_eq!(req.method.unwrap(), "OPTIONS");
+            assert_eq!(req.path.unwrap(), "sips:3000@172.16.246.223:5061");
+            assert_eq!(req.version.unwrap(), 20);
+            assert_eq!(req.headers.len(), 0);
+        }
+    }
+    req! {
+        test_sip_option_via_maxf,
+        b"OPTIONS sips:3000@172.16.246.223:5061 SIP/2.0\r\nVia: SIP/2.0/TLS 172.16.246.13:5061;branch=z9hG4bK641e8389\r\nMax-Forwards: 70\r\n\r\n",
+        |req| {
+            assert_eq!(req.method.unwrap(), "OPTIONS");
+            assert_eq!(req.path.unwrap(), "sips:3000@172.16.246.223:5061");
+            assert_eq!(req.version.unwrap(), 20);
+            assert_eq!(req.headers.len(), 2);
+            assert_eq!(req.headers[0].name, "Via");
+            assert_eq!(req.headers[0].value, b"SIP/2.0/TLS 172.16.246.13:5061;branch=z9hG4bK641e8389");
+            assert_eq!(req.headers[1].name, "Max-Forwards");
+            assert_eq!(req.headers[1].value, b"70");
+        }
+    }
+    req! {
+        test_sip_option_full,
+        b"OPTIONS sips:3000@172.16.246.223:5061 SIP/2.0\r\nVia: SIP/2.0/TLS 172.16.246.13:5061;branch=z9hG4bK641e8389\r\nMax-Forwards: 70\r\nFrom: \"asterisk\" <sip:asterisk@172.16.246.13>;tag=as17254bdb\r\nTo: <sips:3000@172.16.246.223:5061>\r\nContact: <sip:asterisk@172.16.246.13:5061;transport=tls>\r\nCall-ID: 1a3b735076e74ae10a3541710c9fc63a@172.16.246.13:5061\r\nCSeq: 102 OPTIONS\r\nUser-Agent: Asterisk PBX 18.10.0~dfsg+~cs6.10.40431411-2\r\nDate: Tue, 02 May 2023 15:45:05 GMT\r\nAllow: INVITE, ACK, CANCEL, OPTIONS, BYE, REFER, SUBSCRIBE, NOTIFY, INFO, PUBLISH, MESSAGE\r\nSupported: replaces, timer\r\nContent-Length: 0\r\n\r\n",
+        |req| {
+            assert_eq!(req.method.unwrap(), "OPTIONS");
+            assert_eq!(req.path.unwrap(), "sips:3000@172.16.246.223:5061");
+            assert_eq!(req.version.unwrap(), 20);
+            assert_eq!(req.headers.len(), 12);
+            assert_eq!(req.headers[0].name, "Via");
+            assert_eq!(req.headers[0].value, b"SIP/2.0/TLS 172.16.246.13:5061;branch=z9hG4bK641e8389");
+            assert_eq!(req.headers[1].name, "Max-Forwards");
+            assert_eq!(req.headers[1].value, b"70");
+            assert_eq!(req.headers[2].name, "From");
+            assert_eq!(req.headers[2].value, b"\"asterisk\" <sip:asterisk@172.16.246.13>;tag=as17254bdb");
+            assert_eq!(req.headers[3].name, "To");
+            assert_eq!(req.headers[3].value, b"<sips:3000@172.16.246.223:5061>");
+            assert_eq!(req.headers[4].name, "Contact");
+            assert_eq!(req.headers[4].value, b"<sip:asterisk@172.16.246.13:5061;transport=tls>");
+            assert_eq!(req.headers[5].name, "Call-ID");
+            assert_eq!(req.headers[5].value, b"1a3b735076e74ae10a3541710c9fc63a@172.16.246.13:5061");
+            assert_eq!(req.headers[6].name, "CSeq");
+            assert_eq!(req.headers[6].value, b"102 OPTIONS");
+            assert_eq!(req.headers[7].name, "User-Agent");
+            assert_eq!(req.headers[7].value, b"Asterisk PBX 18.10.0~dfsg+~cs6.10.40431411-2");
+            assert_eq!(req.headers[8].name, "Date");
+            assert_eq!(req.headers[8].value, b"Tue, 02 May 2023 15:45:05 GMT");
+            assert_eq!(req.headers[9].name, "Allow");
+            assert_eq!(req.headers[9].value, b"INVITE, ACK, CANCEL, OPTIONS, BYE, REFER, SUBSCRIBE, NOTIFY, INFO, PUBLISH, MESSAGE");
+            assert_eq!(req.headers[10].name, "Supported");
+            assert_eq!(req.headers[10].value, b"replaces, timer");
+            assert_eq!(req.headers[11].name, "Content-Length");
+            assert_eq!(req.headers[11].value, b"0");
+        }
     }
 
     req! {
@@ -1546,6 +1619,36 @@ mod tests {
             assert_eq!(res.reason.unwrap(), "OK");
         }
     }
+
+    res! {
+        test_sip_response_simple,
+        b"SIP/2.0 200 OK\r\n\r\n",
+        |res| {
+            assert_eq!(res.version.unwrap(), 20);
+            assert_eq!(res.code.unwrap(), 200);
+            assert_eq!(res.reason.unwrap(), "OK");
+        }
+    }
+
+    res! {
+        test_sip_response_compact,
+        b"SIP/2.0 200 OK\r\nFrom: <sips:3000@172.16.246.13:5061>;tag=a1d6828546\r\nCSeq: 86639665 REGISTER\r\nExpires: 60\r\nContact: <sips:3000@172.16.246.223:5061>;expires=60\r\n\r\n",
+        |res| {
+            assert_eq!(res.version.unwrap(), 20);
+            assert_eq!(res.code.unwrap(), 200);
+            assert_eq!(res.reason.unwrap(), "OK");
+            assert_eq!(res.headers.len(), 4);
+            assert_eq!(res.headers[0].name, "From");
+            assert_eq!(res.headers[0].value, b"<sips:3000@172.16.246.13:5061>;tag=a1d6828546");
+            assert_eq!(res.headers[1].name, "CSeq");
+            assert_eq!(res.headers[1].value, b"86639665 REGISTER");
+            assert_eq!(res.headers[2].name, "Expires");
+            assert_eq!(res.headers[2].value, b"60");
+            assert_eq!(res.headers[3].name, "Contact");
+            assert_eq!(res.headers[3].value, b"<sips:3000@172.16.246.223:5061>;expires=60");
+        }
+    }
+
 
     res! {
         test_response_newlines,
